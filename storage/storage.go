@@ -22,6 +22,14 @@ func (c *ConcurrentSet[T]) Add(value T) {
 	c.set[value] = struct{}{}
 }
 
+func (c *ConcurrentSet[T]) Present(value T) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	_, prs := c.set[value]
+	return prs
+}
+
 func (c *ConcurrentSet[T]) GetAll() []T {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

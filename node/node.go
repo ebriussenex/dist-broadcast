@@ -1,45 +1,80 @@
 package node
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/ebriussenex/dist-broadcast/message"
 	"github.com/ebriussenex/dist-broadcast/storage"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-type Storage interface {
-	Add(int)
-	GetAll() []int
-}
+type (
+	Storage interface {
+		Add(int)
+		GetAll() []int
+		Present(int) bool
+	}
 
-type Node struct {
-	storage   Storage
-	neighbors []string
-	node      *maelstrom.Node
-}
+	Node struct {
+		storage   Storage
+		neighbors []string
+		node      *maelstrom.Node
 
-func New(node *maelstrom.Node, storage *storage.ConcurrentSet[int]) Node {
+		waitForResponse time.Duration
+	}
+)
+
+func New(node *maelstrom.Node, storage *storage.ConcurrentSet[int], waitForResponse time.Duration) Node {
 	return Node{
-		storage, make([]string, 0), node,
+		storage, make([]string, 0), node, waitForResponse,
 	}
 }
 
-func (n *Node) broadcastMsg(msg maelstrom.Message) {
+func (n *Node) broadcastMsg(msg maelstrom.Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), n.waitForResponse)
+	defer cancel()
+
+	errChan := make(chan error)
+
+	var wg sync.WaitGroup
+	wg.Add(len(n.neighbors))
+
 	for _, neighbor := range n.neighbors {
-		err := n.node.RPC(neighbor, msg, func(response maelstrom.Message) {
+		go func(neighbor string) {
+			defer wg.Done()
+			response, err := n.node.SyncRPC(ctx, neighbor, msg.Body)
+			if err != nil {
+				errChan <- fmt.Errorf("rpc to neighbor: %s failed: %w", neighbor, err)
+				return
+			}
 
-		})
-		if err != nil {
-			return fmt.Errorf("failed to init RPC to node: %s, err: %w", err)
-		}
+			if response.Type() != "broadcast_ok" {
+				errChan <- fmt.Errorf("unexpected message status: neighbor: %s, type: %s", neighbor, response.Type())
+				return
+			}
+
+		}(neighbor)
 	}
-	n.node.RPC()
-}
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
 
-func (n *Node) BroadcastWaiter() {
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
+	}
 
+	if len(errs) != 0 {
+		return fmt.Errorf("one ore more broadcasts failed: %w", errors.Join(errs...))
+	}
+
+	return nil
 }
 
 func (n *Node) HandleBroadcast(msg maelstrom.Message) error {
@@ -48,15 +83,22 @@ func (n *Node) HandleBroadcast(msg maelstrom.Message) error {
 		return fmt.Errorf("failed to unmarshall request: %w", err)
 	}
 
+	if n.storage.Present(request.Message) {
+		return nil
+	}
+
 	n.storage.Add(request.Message)
 
 	if err := n.node.Reply(msg, message.BroadcastResp{
-		Type: "broadcast_ok",
+		Type:      "broadcast_ok",
+		InReplyTo: request.MsgID,
 	}); err != nil {
-		return fmt.Errorf("failed to handle broadcast %w", err)
+		return fmt.Errorf("failed to reply to broadcast msg: %w", err)
 	}
 
-	n.broadcastMsg(msg)
+	if err := n.broadcastMsg(msg); err != nil {
+		return fmt.Errorf("broadcasting to neighbors failed: %w", err)
+	}
 
 	return nil
 }

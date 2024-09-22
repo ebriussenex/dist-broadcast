@@ -10,10 +10,12 @@ type (
 	BroadcastReq struct {
 		Message int    `json:"message"`
 		Type    string `json:"type"`
+		MsgID   int    `json:"msg_id"`
 	}
 
 	BroadcastResp struct {
-		Type string `json:"type"`
+		Type      string `json:"type"`
+		InReplyTo int    `json:"in_reply_to"`
 	}
 
 	ReadReq struct {

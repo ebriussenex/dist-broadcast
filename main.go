@@ -3,8 +3,9 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 
-	"github.com/ebriussenex/dist-broadcast/handler"
+	"github.com/ebriussenex/dist-broadcast/node"
 	"github.com/ebriussenex/dist-broadcast/storage"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -12,7 +13,7 @@ import (
 func main() {
 	storage := storage.Init[int]()
 	n := maelstrom.NewNode()
-	h := handler.New(n, storage)
+	h := node.New(n, storage, time.Second*5)
 
 	n.Handle("broadcast", h.HandleBroadcast)
 	n.Handle("read", h.HandleRead)
