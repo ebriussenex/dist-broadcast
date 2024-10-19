@@ -26,12 +26,16 @@ type (
 		node      *maelstrom.Node
 
 		waitForResponse time.Duration
+
+		withRetry retryFunc
 	}
+
+	retryFunc func(func() error) error
 )
 
-func New(node *maelstrom.Node, storage *storage.ConcurrentSet[int], waitForResponse time.Duration) Node {
+func New(node *maelstrom.Node, storage *storage.ConcurrentSet[int], waitForResponse time.Duration, withRetry retryFunc) Node {
 	return Node{
-		storage, make([]string, 0), node, waitForResponse,
+		storage, make([]string, 0), node, waitForResponse, withRetry,
 	}
 }
 
@@ -47,15 +51,17 @@ func (n *Node) broadcastMsg(msg maelstrom.Message) error {
 	for _, neighbor := range n.neighbors {
 		go func(neighbor string) {
 			defer wg.Done()
-			response, err := n.node.SyncRPC(ctx, neighbor, msg.Body)
-			if err != nil {
-				errChan <- fmt.Errorf("rpc to neighbor: %s failed: %w", neighbor, err)
+			// ignore the one who sent
+			if neighbor == msg.Src {
 				return
 			}
 
-			if response.Type() != "broadcast_ok" {
-				errChan <- fmt.Errorf("unexpected message status: neighbor: %s, type: %s", neighbor, response.Type())
-				return
+			err := n.withRetry(func() error {
+				return n.broadcastToNeighbor(ctx, neighbor, msg.Body)
+			})
+
+			if err != nil {
+				errChan <- err
 			}
 
 		}(neighbor)
@@ -77,6 +83,18 @@ func (n *Node) broadcastMsg(msg maelstrom.Message) error {
 	return nil
 }
 
+func (n *Node) broadcastToNeighbor(ctx context.Context, neighbor string, msgBody json.RawMessage) error {
+	response, err := n.node.SyncRPC(ctx, neighbor, msgBody)
+	if err != nil {
+		return fmt.Errorf("rpc to neighbor: %s failed: %w", neighbor, err)
+	}
+
+	if response.Type() != "broadcast_ok" {
+		return fmt.Errorf("unexpected message status: neighbor: %s, type: %s", neighbor, response.Type())
+	}
+	return nil
+}
+
 func (n *Node) HandleBroadcast(msg maelstrom.Message) error {
 	var request message.BroadcastReq
 	if err := json.Unmarshal(msg.Body, &request); err != nil {
@@ -89,15 +107,27 @@ func (n *Node) HandleBroadcast(msg maelstrom.Message) error {
 
 	n.storage.Add(request.Message)
 
+	err := n.withRetry(func() error {
+		return n.acknowledgeBroadcast(msg, request)
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to acknowledge broadcast: %w", err)
+	}
+
+	if err := n.broadcastMsg(msg); err != nil {
+		return fmt.Errorf("broadcasting to neighbors failed: %w", err)
+	}
+
+	return nil
+}
+
+func (n *Node) acknowledgeBroadcast(msg maelstrom.Message, request message.BroadcastReq) error {
 	if err := n.node.Reply(msg, message.BroadcastResp{
 		Type:      "broadcast_ok",
 		InReplyTo: request.MsgID,
 	}); err != nil {
 		return fmt.Errorf("failed to reply to broadcast msg: %w", err)
-	}
-
-	if err := n.broadcastMsg(msg); err != nil {
-		return fmt.Errorf("broadcasting to neighbors failed: %w", err)
 	}
 
 	return nil
@@ -111,9 +141,11 @@ func (n *Node) HandleRead(msg maelstrom.Message) error {
 
 	messages := n.storage.GetAll()
 
-	return n.node.Reply(msg, message.ReadResp{
-		Type:     "read_ok",
-		Messages: messages,
+	return n.withRetry(func() error {
+		return n.node.Reply(msg, message.ReadResp{
+			Type:     "read_ok",
+			Messages: messages,
+		})
 	})
 }
 
@@ -128,7 +160,9 @@ func (n *Node) HandleTopology(msg maelstrom.Message) error {
 		n.neighbors = neighbors
 	}
 
-	return n.node.Reply(msg, message.TopologyResp{
-		Type: "topology_ok",
+	return n.withRetry(func() error {
+		return n.node.Reply(msg, message.TopologyResp{
+			Type: "topology_ok",
+		})
 	})
 }
