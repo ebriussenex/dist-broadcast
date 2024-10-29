@@ -1,12 +1,6 @@
 package message
 
 type (
-	msgCommon struct {
-		InReply int    `json:"in_reply"`
-		Type    string `json:"type"`
-		MsgID   int    `json:"msg_id"`
-	}
-
 	BroadcastReq struct {
 		Message int    `json:"message"`
 		Type    string `json:"type"`
@@ -14,6 +8,16 @@ type (
 	}
 
 	BroadcastResp struct {
+		Type      string `json:"type"`
+		InReplyTo int    `json:"in_reply_to"`
+	}
+
+	SyncReq struct {
+		Messages []int  `json:"messages"`
+		Type     string `json:"type"`
+	}
+
+	SyncResp struct {
 		Type      string `json:"type"`
 		InReplyTo int    `json:"in_reply_to"`
 	}

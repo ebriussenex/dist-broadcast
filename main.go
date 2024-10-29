@@ -1,28 +1,31 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
 
 	"github.com/ebriussenex/dist-broadcast/node"
 	retry "github.com/ebriussenex/dist-broadcast/pkg"
-	"github.com/ebriussenex/dist-broadcast/storage"
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 func main() {
-	storage := storage.Init[int]()
 	n := maelstrom.NewNode()
+	ctx := context.Background()
 
 	retryFunc := func(fn func() error) error {
-		return retry.FixedInterval(fn, 5, time.Second)
+		return retry.FixedInterval(fn, 5, time.Millisecond*100)
 	}
-	h := node.New(n, storage, time.Second*5, retryFunc)
+	syncInterval := time.Millisecond * 50
+	syncDeadline := time.Millisecond * 300
+	h := node.New(ctx, n, time.Second*3, retryFunc, syncInterval, syncDeadline, 5)
 
 	n.Handle("broadcast", h.HandleBroadcast)
 	n.Handle("read", h.HandleRead)
 	n.Handle("topology", h.HandleTopology)
+	n.Handle("sync", h.HandleSync)
 
 	if err := n.Run(); err != nil {
 		log.Printf("ERROR: %s", err)
