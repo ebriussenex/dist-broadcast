@@ -3,9 +3,8 @@ package node
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sync"
+	"log/slog"
 	"time"
 
 	"github.com/ebriussenex/dist-broadcast/message"
@@ -15,84 +14,111 @@ import (
 
 type (
 	Storage interface {
-		Add(int)
+		Add(...int)
 		GetAll() []int
 		Present(int) bool
+		Size() int
+		Clear()
+		Delete(int)
 	}
 
 	Node struct {
+		ctx       context.Context
 		storage   Storage
 		neighbors []string
 		node      *maelstrom.Node
 
 		waitForResponse time.Duration
-
-		withRetry retryFunc
+		withRetry       retryFunc
+		nodeSyncer      *nodeSyncer
 	}
 
 	retryFunc func(func() error) error
 )
 
-func New(node *maelstrom.Node, storage *storage.ConcurrentSet[int], waitForResponse time.Duration, withRetry retryFunc) Node {
-	return Node{
-		storage, make([]string, 0), node, waitForResponse, withRetry,
+func New(
+	ctx context.Context,
+	maelstromNode *maelstrom.Node,
+	waitForResponse time.Duration,
+	withRetry retryFunc,
+	syncInterval time.Duration,
+	syncDeadline time.Duration,
+	batchSize int,
+) *Node {
+	node := &Node{
+		ctx:             ctx,
+		storage:         storage.Init[int](),
+		neighbors:       make([]string, 0),
+		node:            maelstromNode,
+		waitForResponse: waitForResponse,
+		withRetry:       withRetry,
 	}
-}
 
-func (n *Node) broadcastMsg(msg maelstrom.Message) error {
-	ctx, cancel := context.WithTimeout(context.Background(), n.waitForResponse)
-	defer cancel()
-
-	errChan := make(chan error)
-
-	var wg sync.WaitGroup
-	wg.Add(len(n.neighbors))
-
-	for _, neighbor := range n.neighbors {
-		go func(neighbor string) {
-			defer wg.Done()
-			// ignore the one who sent
-			if neighbor == msg.Src {
-				return
-			}
-
-			err := n.withRetry(func() error {
-				return n.broadcastToNeighbor(ctx, neighbor, msg.Body)
-			})
-
+	sendSync := func(neighbor string, msgs []int) error {
+		ctx, cancel := context.WithTimeout(node.ctx, waitForResponse)
+		defer cancel()
+		return withRetry(func() error {
+			err := node.syncWithNeighbor(ctx, neighbor, msgs)
 			if err != nil {
-				errChan <- err
+				slog.Default().With("neighbor", neighbor).Error("failed sync with neighbor", "err", err)
 			}
-
-		}(neighbor)
-	}
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-
-	var errs []error
-	for err := range errChan {
-		errs = append(errs, err)
+			return err
+		})
 	}
 
-	if len(errs) != 0 {
-		return fmt.Errorf("one ore more broadcasts failed: %w", errors.Join(errs...))
-	}
+	node.nodeSyncer = NewNodeSyncer(syncInterval, syncDeadline, batchSize, sendSync)
+	go node.nodeSyncer.serveSync(ctx)
 
-	return nil
+	return node
 }
 
-func (n *Node) broadcastToNeighbor(ctx context.Context, neighbor string, msgBody json.RawMessage) error {
-	response, err := n.node.SyncRPC(ctx, neighbor, msgBody)
+func (n *Node) syncWithNeighbor(ctx context.Context, neighbor string, messages []int) error {
+	syncMessage := message.SyncReq{
+		Type:     "sync",
+		Messages: messages,
+	}
+
+	response, err := n.node.SyncRPC(ctx, neighbor, syncMessage)
 	if err != nil {
 		return fmt.Errorf("rpc to neighbor: %s failed: %w", neighbor, err)
 	}
 
-	if response.Type() != "broadcast_ok" {
+	if response.Type() != "sync_ok" {
 		return fmt.Errorf("unexpected message status: neighbor: %s, type: %s", neighbor, response.Type())
 	}
 	return nil
+}
+
+func (n *Node) HandleSync(syncMsg maelstrom.Message) error {
+	err := n.withRetry(func() error {
+		return n.node.Reply(syncMsg, message.SyncResp{
+			Type: "sync_ok",
+		})
+	})
+
+	if err != nil {
+		slog.Error("failed to reply to sync", "err", err)
+		return err
+	}
+
+	var syncReq message.SyncReq
+	if err := json.Unmarshal(syncMsg.Body, &syncReq); err != nil {
+		return fmt.Errorf("failed to unmarshall request: %w", err)
+	}
+
+	fromNeighbor := syncMsg.Src
+	n.nodeSyncer.removeKnownMessages(fromNeighbor, syncReq.Messages)
+
+	n.storage.Add(syncReq.Messages...)
+
+	for _, neighbor := range n.neighbors {
+		if neighbor == syncMsg.Src {
+			continue
+		}
+		n.nodeSyncer.addMessages(neighbor, syncReq.Messages...)
+	}
+
+	return err
 }
 
 func (n *Node) HandleBroadcast(msg maelstrom.Message) error {
@@ -106,30 +132,28 @@ func (n *Node) HandleBroadcast(msg maelstrom.Message) error {
 	}
 
 	n.storage.Add(request.Message)
+	for _, neighbor := range n.neighbors {
+		n.nodeSyncer.addMessages(neighbor, request.Message)
+	}
 
 	err := n.withRetry(func() error {
-		return n.acknowledgeBroadcast(msg, request)
+		return n.acknowledgeBroadcast(msg)
 	})
 
 	if err != nil {
+		slog.Error("failed to acknowledge broadcast", "err", err)
 		return fmt.Errorf("failed to acknowledge broadcast: %w", err)
-	}
-
-	if err := n.broadcastMsg(msg); err != nil {
-		return fmt.Errorf("broadcasting to neighbors failed: %w", err)
 	}
 
 	return nil
 }
 
-func (n *Node) acknowledgeBroadcast(msg maelstrom.Message, request message.BroadcastReq) error {
+func (n *Node) acknowledgeBroadcast(msg maelstrom.Message) error {
 	if err := n.node.Reply(msg, message.BroadcastResp{
-		Type:      "broadcast_ok",
-		InReplyTo: request.MsgID,
+		Type: "broadcast_ok",
 	}); err != nil {
-		return fmt.Errorf("failed to reply to broadcast msg: %w", err)
+		return err
 	}
-
 	return nil
 }
 
@@ -141,12 +165,18 @@ func (n *Node) HandleRead(msg maelstrom.Message) error {
 
 	messages := n.storage.GetAll()
 
-	return n.withRetry(func() error {
+	err := n.withRetry(func() error {
 		return n.node.Reply(msg, message.ReadResp{
 			Type:     "read_ok",
 			Messages: messages,
 		})
 	})
+
+	if err != nil {
+		slog.Error("failed to reply read", "err", err)
+	}
+
+	return err
 }
 
 func (n *Node) HandleTopology(msg maelstrom.Message) error {
@@ -155,14 +185,21 @@ func (n *Node) HandleTopology(msg maelstrom.Message) error {
 		return fmt.Errorf("failed to unmarshall request: %w", err)
 	}
 
-	selfNodeIS := n.node.ID()
-	if neighbors, ok := request.Topology[selfNodeIS]; ok {
+	selfNodeID := n.node.ID()
+	if neighbors, ok := request.Topology[selfNodeID]; ok {
 		n.neighbors = neighbors
+		n.nodeSyncer.initNeighbors(neighbors)
 	}
 
-	return n.withRetry(func() error {
+	err := n.withRetry(func() error {
 		return n.node.Reply(msg, message.TopologyResp{
 			Type: "topology_ok",
 		})
 	})
+
+	if err != nil {
+		slog.Error("failed to reply topology", "err", err)
+	}
+
+	return err
 }

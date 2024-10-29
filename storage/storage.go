@@ -15,11 +15,13 @@ func Init[T comparable]() *ConcurrentSet[T] {
 	}
 }
 
-func (c *ConcurrentSet[T]) Add(value T) {
+func (c *ConcurrentSet[T]) Add(values ...T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.set[value] = struct{}{}
+	for _, v := range values {
+		c.set[v] = struct{}{}
+	}
 }
 
 func (c *ConcurrentSet[T]) Present(value T) bool {
@@ -40,4 +42,22 @@ func (c *ConcurrentSet[T]) GetAll() []T {
 	}
 
 	return res
+}
+
+func (c *ConcurrentSet[T]) Size() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.set)
+}
+
+func (c *ConcurrentSet[T]) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.set = make(map[T]struct{})
+}
+
+func (c *ConcurrentSet[T]) Delete(val T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.set, val)
 }
