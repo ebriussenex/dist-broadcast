@@ -47,14 +47,12 @@ func (c *ConcurrentSet[T]) GetAll() []T {
 func (c *ConcurrentSet[T]) Size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	return len(c.set)
 }
 
 func (c *ConcurrentSet[T]) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 	c.set = make(map[T]struct{})
 }
 

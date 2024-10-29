@@ -9,12 +9,10 @@ import (
 )
 
 type (
-	// node callback function to make an rpc call with syncer data
 	sendSyncFn       func(string, []int) error
 	neighborSyncData struct {
-		mu           *sync.Mutex
-		lastTimeSync time.Time
-		// this is needed only to undo marking if sync had failed
+		mu             *sync.Mutex
+		lastTimeSync   time.Time
 		prevTimeSync   time.Time
 		messagesToSync map[int]struct{}
 	}
@@ -122,7 +120,6 @@ func (n *nodeSyncer) removeKnownMessages(neighbor string, msgs []int) {
 	}
 }
 
-// main loop of syncing
 func (n *nodeSyncer) serveSync(ctx context.Context) {
 	for n.neighborsSyncList == nil {
 		<-time.After(n.syncInterval)
@@ -165,7 +162,6 @@ func (n *nodeSyncer) syncNeighbors() {
 			msgsToSync := n.fetchAndClear(neighbor)
 			if err := n.sendSync(neighbor, msgsToSync); err != nil {
 				errChan <- err
-				// if sync failed it is important to save messages been tried to synced, while keeping messages aqcuired in between
 				n.addMessages(neighbor, msgsToSync...)
 				neighborData.lastTimeSync = neighborData.prevTimeSync
 				return
