@@ -78,13 +78,6 @@ func (n *Node) syncWithNeighbor(ctx context.Context, neighbor string, messages [
 		Messages: messages,
 	}
 
-	// msgBody, err := json.Marshal(syncMessage)
-	// 	if err != nil {
-	// 		return fmt.Errorf("failed to marshal sync message: %w", err)
-	// 	}
-
-	// 	slog.Info("deserialized json", "body", msgBody)
-
 	response, err := n.node.SyncRPC(ctx, neighbor, syncMessage)
 	if err != nil {
 		return fmt.Errorf("rpc to neighbor: %s failed: %w", neighbor, err)
