@@ -1,4 +1,4 @@
-# Broadcasting distributed system
+# Distributed broadcasting system
 
 This repository presents a fast, fault-tolerant distributed broadcast system that allows you to broadcast messages to multiple nodes on any network topology. Configurable for different loads and different topologies.  A message that was sent to one node will quickly appear on all the others and temporary network problems will not lead to never-read or duplicated messages, due to asynchronous synchronization.  
 The protocol is based on the [maelstrom](https://github.com/jepsen-io/maelstrom) protocol and runs only with this protocol.  
